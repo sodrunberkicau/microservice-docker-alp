@@ -8,7 +8,8 @@ const OrderList = ({ user }) => {
     const [isMobile, setIsMobile] = useState(false);
     const [uploading, setUploading] = useState({});
     const [showImageModal, setShowImageModal] = useState({});
-    const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8090';
+    // const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8090';
+    const API_URL ='http://order.localhost';
 
     useEffect(() => {
         // Check screen width for mobile detection

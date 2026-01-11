@@ -22,7 +22,7 @@ function App() {
     }, []);
     const fectProfile = () => {
         const token = localStorage.getItem('token');
-        axios.get('http://localhost:8090/api/users/profile', {
+        axios.get('http://user.localhost/api/users/profile', {
             headers: {
                 Authorization: `Bearer ${token}`,
                 'Content-Type': 'application/json',

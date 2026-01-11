@@ -1,5 +1,3 @@
-version: '3.8'
-
 networks:
   ecommerce-net:
     driver: bridge
@@ -17,16 +15,26 @@ services:
   # INFRASTRUCTURE (Traefik API Gateway) 
   # ---------------------------------------------------------------------------
   traefik:
-    image: traefik:v2.10
-    container_name: traefik
+    image: traefik:v3.6
+#    container_name: traefik
     command:
-      - "--configFile=/etc/traefik/traefik.yml"
+      - --api.dashboard=true
+      - --log.level=DEBUG
+      - --accesslog=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=ecommerce-net
+      - --entryPoints.web.address=:80
+#      - "--configFile=/etc/traefik/traefik.yml"
     ports:
-      - "8090:80"
+      - "80:80"
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./traefik/traefik.yml:/etc/traefik/traefik.yml
+#      - ./traefik/traefik.yml:/etc/traefik/traefik.yml
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     networks:
       - ecommerce-net
     labels:
@@ -201,7 +209,7 @@ services:
       - ecommerce-net
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.products.rule=Host(`localhost`) && PathPrefix(`/api/products`)"
+      - "traefik.http.routers.products.rule=Host(`product.localhost`)"
       - "traefik.http.routers.products.service=products"
       - "traefik.http.services.products.loadbalancer.server.port=3001"
       - "traefik.http.middlewares.products-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE,PATCH"
@@ -229,7 +237,8 @@ services:
       - ecommerce-net
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.orders.rule=Host(`localhost`) && PathPrefix(`/api/orders`)"
+#      - "traefik.http.routers.orders.rule=Host(`localhost`) && PathPrefix(`/api/orders`)"
+      - "traefik.http.routers.orders.rule=Host(`order.localhost`)"
       - "traefik.http.routers.orders.service=orders"
       - "traefik.http.services.orders.loadbalancer.server.port=3002"
       - "traefik.http.middlewares.orders-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE,PATCH"
@@ -281,7 +290,8 @@ services:
       - ecommerce-net
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.users.rule=Host(`localhost`) && PathPrefix(`/api/users`)"
+#      - "traefik.http.routers.users.rule=Host(`localhost`) && PathPrefix(`/api/users`)"
+      - "traefik.http.routers.users.rule=Host(`user.localhost`)"
       - "traefik.http.routers.users.service=users"
       - "traefik.http.services.users.loadbalancer.server.port=3003"
       - "traefik.http.middlewares.users-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE"
@@ -295,10 +305,10 @@ services:
   client:
     build: ./client
     container_name: client
-    ports:
-      - "5173:5173"
-    environment:
-      - VITE_API_URL=http://localhost:8090
+#    ports:
+#      - "5173:5173"
+#    environment:
+#      - VITE_API_URL=http://localhost:8090
     networks:
       - ecommerce-net
     labels:
@@ -319,9 +329,9 @@ services:
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
+#    ports:
+#      - "9000:9000"
+#      - "9001:9001"
     networks:
       - ecommerce-net
     labels:
@@ -333,7 +343,7 @@ services:
   # MESSAGE BROKER
   # ---------------------------------------------------------------------------
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:3.8-management-alpine
     container_name: rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: user
@@ -343,10 +353,12 @@ services:
       - "15672:15672" # Management UI
     networks:
       - ecommerce-net
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmqctl", "status"]
       interval: 10s
-      timeout: 5s
+      timeout: 20s
       retries: 5
 
 
@@ -365,7 +377,8 @@ services:
       - SMTP_PASS=zsfj jvcv lgoh vnck
       - FROM_EMAIL=hannan.azkatlg@gmail.com
     depends_on:
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
     networks:
       - ecommerce-net
     labels:
