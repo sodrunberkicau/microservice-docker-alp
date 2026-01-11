@@ -1,0 +1,381 @@
+version: '3.8'
+
+networks:
+  ecommerce-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  mysql_data:
+  prometheus_data:
+  grafana_data:
+  minio_data:
+  rabbitmq_data:
+
+services:
+  # ---------------------------------------------------------------------------
+  # INFRASTRUCTURE (Traefik API Gateway) 
+  # ---------------------------------------------------------------------------
+  traefik:
+    image: traefik:v2.10
+    container_name: traefik
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+    ports:
+      - "8090:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml
+    networks:
+      - ecommerce-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.localhost`)"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.middlewares.cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE"
+      - "traefik.http.middlewares.cors.headers.accesscontrolalloworiginlist=*"
+      - "traefik.http.middlewares.cors.headers.accesscontrolmaxage=100"
+      - "traefik.http.middlewares.cors.headers.addvaryheader=true"
+      - "traefik.http.middlewares.cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Requested-With"
+
+  # ---------------------------------------------------------------------------
+  # DATABASES
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: ecommerce_pg
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
+    networks:
+      - ecommerce-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d ecommerce_pg"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: ecommerce_mysql
+      MYSQL_USER: user
+      MYSQL_PASSWORD: password
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d
+    networks:
+      - ecommerce-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    networks:
+      - ecommerce-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # MONITORING
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    ports:
+      - "9090:9090"
+    networks:
+      - ecommerce-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3010:3000"
+    networks:
+      - ecommerce-net
+    depends_on:
+      - prometheus
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points'
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    networks:
+      - ecommerce-net
+
+  # cadvisor:
+  #   image: gcr.io/cadvisor/cadvisor:latest
+  #   container_name: cadvisor
+  #   platform: linux/amd64
+  #   volumes:
+  #     - /:/rootfs:ro
+  #     - /var/run:/var/run:ro
+  #     - /sys:/sys:ro
+  #     - /var/lib/docker/:/var/lib/docker:ro
+  #     - /dev/disk/:/dev/disk:ro
+  #   ports:
+  #     - "8081:8080"
+  #   networks:
+  #     - ecommerce-net
+
+  # ---------------------------------------------------------------------------
+  # SERVICES
+  # ---------------------------------------------------------------------------
+  auth-service:
+    build: ./services/auth-service
+    container_name: auth-service
+    environment:
+      - PORT=3000
+      - DB_HOST=mysql
+      - DB_USER=user
+      - DB_PASSWORD=password
+      - DB_NAME=ecommerce_mysql
+      - JWT_SECRET=supersecretkey
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - ecommerce-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.auth.rule=Host(`localhost`) && PathPrefix(`/api/auth`)"
+      - "traefik.http.routers.auth.service=auth"
+      - "traefik.http.services.auth.loadbalancer.server.port=3000"
+      - "traefik.http.middlewares.auth-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE"
+      - "traefik.http.middlewares.auth-cors.headers.accesscontrolalloworiginlist=*"
+      - "traefik.http.middlewares.auth-cors.headers.accesscontrolmaxage=100"
+      - "traefik.http.middlewares.auth-cors.headers.addvaryheader=true"
+      - "traefik.http.middlewares.auth-cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Requested-With"
+      - "traefik.http.middlewares.auth-strip.stripprefix.prefixes=/api/auth"
+      - "traefik.http.routers.auth.middlewares=auth-strip,auth-cors"
+
+  product-service:
+    build: ./services/product-service
+    container_name: product-service
+    environment:
+      - PORT=3001
+      - DB_HOST=postgres
+      - DB_USER=user
+      - DB_PASSWORD=password
+      - DB_NAME=ecommerce_pg
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ecommerce-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.products.rule=Host(`localhost`) && PathPrefix(`/api/products`)"
+      - "traefik.http.routers.products.service=products"
+      - "traefik.http.services.products.loadbalancer.server.port=3001"
+      - "traefik.http.middlewares.products-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE,PATCH"
+      - "traefik.http.middlewares.products-cors.headers.accesscontrolalloworiginlist=*"
+      - "traefik.http.middlewares.products-cors.headers.accesscontrolmaxage=100"
+      - "traefik.http.middlewares.products-cors.headers.addvaryheader=true"
+      - "traefik.http.middlewares.products-cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Requested-With"
+      - "traefik.http.middlewares.products-strip.stripprefix.prefixes=/api/products"
+      - "traefik.http.routers.products.middlewares=products-strip,products-cors"
+
+  order-service:
+    build: ./services/order-service
+    container_name: order-service
+    environment:
+      - PORT=3002
+      - DB_HOST=postgres
+      - DB_USER=user
+      - DB_PASSWORD=password
+      - DB_NAME=ecommerce_pg
+      - RABBITMQ_URL=amqp://user:password@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ecommerce-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.orders.rule=Host(`localhost`) && PathPrefix(`/api/orders`)"
+      - "traefik.http.routers.orders.service=orders"
+      - "traefik.http.services.orders.loadbalancer.server.port=3002"
+      - "traefik.http.middlewares.orders-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE,PATCH"
+      - "traefik.http.middlewares.orders-cors.headers.accesscontrolalloworiginlist=*"
+      - "traefik.http.middlewares.orders-cors.headers.accesscontrolmaxage=100"
+      - "traefik.http.middlewares.orders-cors.headers.addvaryheader=true"
+      - "traefik.http.middlewares.orders-cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Requested-With"
+      - "traefik.http.middlewares.orders-strip.stripprefix.prefixes=/api/orders"
+      - "traefik.http.routers.orders.middlewares=orders-strip,orders-cors"
+
+  notification-service:
+    build: ./services/notification-service
+    container_name: notification-service
+    environment:
+      - PORT=3004
+      - WS_PORT=8083
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ecommerce-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.notifications.rule=Host(`localhost`) && PathPrefix(`/ws`)"
+      - "traefik.http.routers.notifications.service=notifications"
+      - "traefik.http.services.notifications.loadbalancer.server.port=3004"
+      - "traefik.http.middlewares.notifications-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE"
+      - "traefik.http.middlewares.notifications-cors.headers.accesscontrolalloworiginlist=*"
+      - "traefik.http.middlewares.notifications-cors.headers.accesscontrolmaxage=100"
+      - "traefik.http.middlewares.notifications-cors.headers.addvaryheader=true"
+      - "traefik.http.middlewares.notifications-cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Requested-With"
+      - "traefik.http.routers.notifications.middlewares=notifications-cors"
+
+  user-service:
+    build: ./services/user-service
+    container_name: user-service
+    environment:
+      - PORT=3003
+      - DB_HOST=mysql
+      - DB_USER=user
+      - DB_PASSWORD=password
+      - DB_NAME=ecommerce_mysql
+      - JWT_SECRET=supersecretkey
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - ecommerce-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.users.rule=Host(`localhost`) && PathPrefix(`/api/users`)"
+      - "traefik.http.routers.users.service=users"
+      - "traefik.http.services.users.loadbalancer.server.port=3003"
+      - "traefik.http.middlewares.users-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE"
+      - "traefik.http.middlewares.users-cors.headers.accesscontrolalloworiginlist=*"
+      - "traefik.http.middlewares.users-cors.headers.accesscontrolmaxage=100"
+      - "traefik.http.middlewares.users-cors.headers.addvaryheader=true"
+      - "traefik.http.middlewares.users-cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Requested-With"
+      - "traefik.http.middlewares.users-strip.stripprefix.prefixes=/api/users"
+      - "traefik.http.routers.users.middlewares=users-strip,users-cors"
+
+  client:
+    build: ./client
+    container_name: client
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8090
+    networks:
+      - ecommerce-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.client.rule=Host(`localhost`) || PathPrefix(`/`)"
+      - "traefik.http.routers.client.priority=1"
+      - "traefik.http.services.client.loadbalancer.server.port=5173"
+
+  # ---------------------------------------------------------------------------
+  # OBJECT STORAGE (MinIO)
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - ecommerce-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.minio.rule=Host(`minio.localhost`)"
+      - "traefik.http.services.minio.loadbalancer.server.port=9001"
+
+  # ---------------------------------------------------------------------------
+  # MESSAGE BROKER
+  # ---------------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: user
+      RABBITMQ_DEFAULT_PASS: password
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
+    networks:
+      - ecommerce-net
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  # ---------------------------------------------------------------------------
+  # EMAIL SERVICE
+  # ---------------------------------------------------------------------------
+  email-service:
+    build: ./services/email-service
+    container_name: email-service
+    environment:
+      - PORT=3005
+      - RABBITMQ_URL=amqp://user:password@rabbitmq:5672
+      - SMTP_HOST=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USER=hannan.azkatlg@gmail.com
+      - SMTP_PASS=zsfj jvcv lgoh vnck
+      - FROM_EMAIL=hannan.azkatlg@gmail.com
+    depends_on:
+      - rabbitmq
+    networks:
+      - ecommerce-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.email.rule=Host(`localhost`) && PathPrefix(`/api/email`)"
+      - "traefik.http.routers.email.service=email"
+      - "traefik.http.services.email.loadbalancer.server.port=3005"
+      - "traefik.http.middlewares.email-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE"
+      - "traefik.http.middlewares.email-cors.headers.accesscontrolalloworiginlist=*"
+      - "traefik.http.middlewares.email-cors.headers.accesscontrolmaxage=100"
+      - "traefik.http.middlewares.email-cors.headers.addvaryheader=true"
+      - "traefik.http.middlewares.email-cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Requested-With"
+      - "traefik.http.routers.email.middlewares=email-cors"
